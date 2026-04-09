@@ -61,6 +61,10 @@ jobs:
           npm init -y
           npm install --save-dev eslint@8 eslint-plugin-security@1
 
+      - name: Ensure ESLint is executable
+        if: steps.check.outputs.skip == 'false'
+        run: chmod +x /tmp/eslint-scan/node_modules/.bin/eslint
+
       - name: Run ESLint
         if: steps.check.outputs.skip == 'false'
         run: |

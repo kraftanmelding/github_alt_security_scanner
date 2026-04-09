@@ -95,19 +95,26 @@ jobs:
 
       - name: Cache Brakeman gem
         if: steps.check.outputs.skip == 'false'
+        id: cache-brakeman
         uses: actions/cache@v4
         with:
           path: /tmp/gems
           key: brakeman-${{ runner.os }}-v1
 
       - name: Install Brakeman
-        if: steps.check.outputs.skip == 'false'
+        if: steps.check.outputs.skip == 'false' && steps.cache-brakeman.outputs.cache-hit != 'true'
         run: GEM_HOME=/tmp/gems gem install brakeman --no-document -q
+
+      - name: Ensure Brakeman is executable
+        if: steps.check.outputs.skip == 'false'
+        run: chmod +x /tmp/gems/bin/brakeman
 
       - name: Run Brakeman
         if: steps.check.outputs.skip == 'false'
+        env:
+          GEM_HOME: /tmp/gems
         run: |
-          GEM_HOME=/tmp/gems /tmp/gems/bin/brakeman \
+          /tmp/gems/bin/brakeman \
             --no-progress \
             --format json \
             --output brakeman-report.json \
@@ -206,6 +213,10 @@ jobs:
           cd /tmp/eslint-scan
           npm init -y
           npm install --save-dev eslint@8 eslint-plugin-security@1
+
+      - name: Ensure ESLint is executable
+        if: steps.check.outputs.skip == 'false'
+        run: chmod +x /tmp/eslint-scan/node_modules/.bin/eslint
 
       - name: Run ESLint
         if: steps.check.outputs.skip == 'false'
