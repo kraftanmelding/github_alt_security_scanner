@@ -10,7 +10,7 @@ on:
 
 jobs:
   security:
-    uses: YOUR_ORG/security-scanner/.github/workflows/full-scan.yml@main
+    uses: YOUR_ORG/github_alt_security_scanner/.github/workflows/full-scan.yml@main
     secrets: inherit
     permissions:
       contents: read
