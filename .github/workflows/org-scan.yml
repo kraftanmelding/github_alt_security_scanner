@@ -1,0 +1,377 @@
+name: Org-Wide Security Scan
+
+on:
+  schedule:
+    - cron: '0 1 * * 1'  # 01:00 UTC / 02:00 CET every Monday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan All Repos
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout scanner repo
+        uses: actions/checkout@v4
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Cache Gitleaks
+        id: cache-gitleaks
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/bin/gitleaks
+          key: gitleaks-8.18.4-${{ runner.os }}
+
+      - name: Install Gitleaks
+        if: steps.cache-gitleaks.outputs.cache-hit != 'true'
+        run: |
+          VERSION="8.18.4"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+
+      - name: Ensure Gitleaks is executable
+        run: chmod +x /usr/local/bin/gitleaks
+
+      - name: Cache Brakeman
+        id: cache-brakeman
+        uses: actions/cache@v4
+        with:
+          path: /tmp/gems
+          key: brakeman-${{ runner.os }}-v1
+
+      - name: Install Brakeman
+        if: steps.cache-brakeman.outputs.cache-hit != 'true'
+        run: GEM_HOME=/tmp/gems gem install brakeman --no-document -q
+
+      - name: Ensure Brakeman is executable
+        run: chmod +x /tmp/gems/bin/brakeman
+
+      - name: Cache ESLint
+        id: cache-eslint
+        uses: actions/cache@v4
+        with:
+          path: /tmp/eslint-scan/node_modules
+          key: eslint-security-${{ runner.os }}-eslint8-security1
+
+      - name: Setup ESLint config
+        run: |
+          mkdir -p /tmp/eslint-scan
+          cat > /tmp/eslint-scan/.eslintrc.json << 'EOF'
+          {
+            "plugins": ["security"],
+            "extends": ["plugin:security/recommended"],
+            "env": { "browser": true, "node": true, "es2022": true },
+            "parserOptions": { "ecmaVersion": 2022, "sourceType": "module" }
+          }
+          EOF
+
+      - name: Install ESLint
+        if: steps.cache-eslint.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp/eslint-scan
+          npm init -y
+          npm install --save-dev eslint@8 eslint-plugin-security@1
+
+      - name: Ensure ESLint is executable
+        run: chmod +x /tmp/eslint-scan/node_modules/.bin/eslint
+
+      - name: Cache Bandit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: bandit-${{ runner.os }}-v1
+
+      - name: Install Bandit
+        run: pip install bandit -q
+
+      - name: List org repos
+        id: repos
+        env:
+          GH_TOKEN: ${{ secrets.SCANNER_PAT }}
+        run: |
+          REPOS=$(gh api "orgs/kraftanmelding/repos" --paginate --jq '.[].name' | tr '\n' ' ')
+          echo "list=$REPOS" >> $GITHUB_OUTPUT
+
+      - name: Scan all repos
+        env:
+          SCANNER_PAT: ${{ secrets.SCANNER_PAT }}
+          GEM_HOME: /tmp/gems
+        run: |
+          mkdir -p /tmp/results
+
+          for REPO in ${{ steps.repos.outputs.list }}; do
+            echo "=== Scanning kraftanmelding/$REPO ==="
+            REPO_DIR="/tmp/repo"
+            RESULTS_DIR="/tmp/results/$REPO"
+            mkdir -p "$RESULTS_DIR"
+
+            # Clone
+            if ! git clone --depth 1 \
+              "https://x-access-token:${SCANNER_PAT}@github.com/kraftanmelding/${REPO}.git" \
+              "$REPO_DIR" 2>/dev/null; then
+              echo "Failed to clone $REPO — skipping"
+              rm -rf "$REPO_DIR"
+              continue
+            fi
+
+            # Gitleaks
+            gitleaks detect \
+              --source="$REPO_DIR" \
+              --report-format=json \
+              --report-path="$RESULTS_DIR/gitleaks.json" \
+              --redact \
+              --exit-code=0 || true
+
+            # Brakeman (only if Gemfile exists)
+            if [ -f "$REPO_DIR/Gemfile" ]; then
+              /tmp/gems/bin/brakeman \
+                --no-progress \
+                --format json \
+                --output "$RESULTS_DIR/brakeman.json" \
+                --quiet \
+                --no-exit-on-warn \
+                --no-exit-on-error \
+                "$REPO_DIR" || true
+            fi
+
+            # ESLint (only if JS/TS/Vue files exist)
+            FILES=$(find "$REPO_DIR" \( -name "*.js" -o -name "*.ts" -o -name "*.vue" \) \
+              -not -path "*/node_modules/*" \
+              -not -path "*/vendor/*" \
+              -not -path "*/.git/*" | tr '\n' ' ')
+            if [ -n "$FILES" ]; then
+              cd /tmp/eslint-scan
+              ./node_modules/.bin/eslint \
+                --format json \
+                --no-eslintrc \
+                --config .eslintrc.json \
+                --resolve-plugins-relative-to /tmp/eslint-scan \
+                $FILES > "$RESULTS_DIR/eslint.json" 2>&1 || true
+              cd -
+            fi
+
+            # Bandit (only if Python files exist)
+            if find "$REPO_DIR" -name "*.py" -not -path "*/.git/*" | grep -q .; then
+              bandit \
+                --recursive "$REPO_DIR" \
+                --format json \
+                --output "$RESULTS_DIR/bandit.json" \
+                --severity-level medium \
+                --confidence-level medium \
+                --exclude "$REPO_DIR/.git,$REPO_DIR/node_modules,$REPO_DIR/vendor" \
+                || true
+            fi
+
+            # Cleanup cloned repo before next iteration
+            rm -rf "$REPO_DIR"
+          done
+
+      - name: Generate HTML report
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+          from datetime import date
+
+          today = date.today().strftime('%B %d, %Y')
+          results_base = '/tmp/results'
+
+          def load_json(path):
+              try:
+                  with open(path) as f:
+                      return json.load(f)
+              except (FileNotFoundError, json.JSONDecodeError):
+                  return None
+
+          def make_table(headers, rows):
+              ths = ''.join(f'<th>{h}</th>' for h in headers)
+              trs = ''.join('<tr>' + ''.join(f'<td>{c}</td>' for c in row) + '</tr>' for row in rows)
+              return f'<table><thead><tr>{ths}</tr></thead><tbody>{trs}</tbody></table>'
+
+          def badge(status, count=0):
+              if status == 'skip':
+                  return '<span class="badge skip">N/A</span>'
+              if status == 'ok':
+                  return '<span class="badge ok">CLEAN</span>'
+              return f'<span class="badge warn">{count}</span>'
+
+          repos = sorted(os.listdir(results_base))
+          all_results = {}
+
+          for repo in repos:
+              repo_dir = os.path.join(results_base, repo)
+              r = {}
+
+              # Gitleaks
+              data = load_json(os.path.join(repo_dir, 'gitleaks.json'))
+              if data is None:
+                  r['Secrets'] = ('skip', 'Gitleaks', 0, '')
+              elif not data:
+                  r['Secrets'] = ('ok', 'Gitleaks', 0, '')
+              else:
+                  rows = [[item['RuleID'], f'<span class="mono">{item["File"]}</span>', str(item['StartLine'])] for item in data]
+                  r['Secrets'] = ('warn', 'Gitleaks', len(data), make_table(['Rule', 'File', 'Line'], rows))
+
+              # Brakeman
+              data = load_json(os.path.join(repo_dir, 'brakeman.json'))
+              if data is None:
+                  r['Ruby/Rails'] = ('skip', 'Brakeman', 0, '')
+              else:
+                  warnings = data.get('warnings', [])
+                  if not warnings:
+                      r['Ruby/Rails'] = ('ok', 'Brakeman', 0, '')
+                  else:
+                      rows = [[w['warning_type'], w['confidence'], f'<span class="mono">{w["file"]}</span>', str(w.get('line', '-')), w['message']] for w in warnings]
+                      r['Ruby/Rails'] = ('warn', 'Brakeman', len(warnings), make_table(['Type', 'Confidence', 'File', 'Line', 'Message'], rows))
+
+              # ESLint
+              data = load_json(os.path.join(repo_dir, 'eslint.json'))
+              if data is None:
+                  r['JavaScript'] = ('skip', 'ESLint', 0, '')
+              else:
+                  rows = []
+                  for f in data:
+                      fname = f['filePath'].split('/')[-1]
+                      for m in f.get('messages', []):
+                          rows.append([m.get('ruleId', ''), f'<span class="mono">{fname}</span>', str(m.get('line', '')), m.get('message', '')])
+                  if not rows:
+                      r['JavaScript'] = ('ok', 'ESLint', 0, '')
+                  else:
+                      r['JavaScript'] = ('warn', 'ESLint', len(rows), make_table(['Rule', 'File', 'Line', 'Message'], rows))
+
+              # Bandit
+              data = load_json(os.path.join(repo_dir, 'bandit.json'))
+              if data is None:
+                  r['Python'] = ('skip', 'Bandit', 0, '')
+              else:
+                  findings = data.get('results', [])
+                  if not findings:
+                      r['Python'] = ('ok', 'Bandit', 0, '')
+                  else:
+                      rows = [[f['test_id'], f['issue_severity'], f'<span class="mono">{f["filename"].split("/")[-1]}</span>', str(f['line_number']), f['issue_text']] for f in findings]
+                      r['Python'] = ('warn', 'Bandit', len(findings), make_table(['Test ID', 'Severity', 'File', 'Line', 'Issue'], rows))
+
+              all_results[repo] = r
+
+          any_issues = any(
+              any(v[0] == 'warn' for v in results.values())
+              for results in all_results.values()
+          )
+
+          # Summary table rows
+          summary_rows = ''
+          for repo, results in all_results.items():
+              has_issues = any(v[0] == 'warn' for v in results.values())
+              overall = '<span class="badge warn">ISSUES</span>' if has_issues else '<span class="badge ok">CLEAN</span>'
+              summary_rows += (
+                  f'<tr>'
+                  f'<td class="repo-name">{repo}</td>'
+                  f'<td>{overall}</td>'
+                  f'<td>{badge(results["Secrets"][0], results["Secrets"][2])}</td>'
+                  f'<td>{badge(results["Ruby/Rails"][0], results["Ruby/Rails"][2])}</td>'
+                  f'<td>{badge(results["JavaScript"][0], results["JavaScript"][2])}</td>'
+                  f'<td>{badge(results["Python"][0], results["Python"][2])}</td>'
+                  f'</tr>'
+              )
+
+          # Detail sections (only repos with issues)
+          details = ''
+          for repo, results in all_results.items():
+              has_issues = any(v[0] == 'warn' for v in results.values())
+              if not has_issues:
+                  continue
+              details += f'<div class="repo-section"><h2>{repo}</h2>'
+              for scanner, (status, tool, count, html) in results.items():
+                  if status == 'warn':
+                      details += (
+                          f'<h3><span class="warn-icon">&#9888;</span> {scanner} — {tool} '
+                          f'<span class="count">({count} issue(s))</span></h3>{html}'
+                      )
+              details += '</div>'
+
+          html_content = f"""<!DOCTYPE html>
+          <html>
+          <head>
+          <meta charset="utf-8">
+          <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 48px; color: #111827; font-size: 13px; line-height: 1.5; }}
+            h1 {{ font-size: 24px; font-weight: 700; margin: 0 0 4px; }}
+            h2 {{ font-size: 17px; font-weight: 700; margin: 0 0 12px; color: #1e3a5f; border-bottom: 2px solid #e5e7eb; padding-bottom: 6px; }}
+            h3 {{ font-size: 14px; margin: 16px 0 8px; display: flex; align-items: center; gap: 6px; }}
+            .date {{ color: #6b7280; margin-bottom: 8px; }}
+            .overall-ok  {{ display: inline-block; background: #dcfce7; color: #166534; padding: 4px 14px; border-radius: 20px; font-weight: 600; margin-bottom: 28px; }}
+            .overall-warn {{ display: inline-block; background: #fee2e2; color: #991b1b; padding: 4px 14px; border-radius: 20px; font-weight: 600; margin-bottom: 28px; }}
+            .warn-icon {{ color: #dc2626; }}
+            .count {{ color: #6b7280; font-weight: 400; font-size: 12px; }}
+            table {{ border-collapse: collapse; width: 100%; margin-bottom: 16px; font-size: 12px; }}
+            th {{ background: #f9fafb; text-align: left; padding: 7px 12px; border: 1px solid #e5e7eb; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; }}
+            td {{ padding: 6px 12px; border: 1px solid #e5e7eb; vertical-align: top; }}
+            tr:nth-child(even) td {{ background: #f9fafb; }}
+            .mono {{ font-family: 'SFMono-Regular', Consolas, monospace; font-size: 11px; }}
+            .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }}
+            .badge.ok   {{ background: #dcfce7; color: #166534; }}
+            .badge.warn {{ background: #fee2e2; color: #991b1b; }}
+            .badge.skip {{ background: #f3f4f6; color: #6b7280; }}
+            .repo-name {{ font-family: 'SFMono-Regular', Consolas, monospace; font-weight: 600; }}
+            .repo-section {{ margin-top: 40px; padding-top: 24px; border-top: 2px solid #e5e7eb; page-break-inside: avoid; }}
+            .all-clear {{ color: #166534; background: #dcfce7; padding: 20px; border-radius: 8px; margin-top: 24px; font-weight: 500; }}
+            .footer {{ margin-top: 48px; font-size: 11px; color: #9ca3af; border-top: 1px solid #e5e7eb; padding-top: 12px; }}
+          </style>
+          </head>
+          <body>
+            <h1>Org-Wide Security Scan &mdash; kraftanmelding</h1>
+            <div class="date">{today} &middot; {len(all_results)} repositories scanned</div>
+            <div class="{'overall-warn' if any_issues else 'overall-ok'}">{'Issues Found' if any_issues else 'All Clear'}</div>
+            <table>
+              <thead><tr><th>Repository</th><th>Overall</th><th>Secrets</th><th>Ruby/Rails</th><th>JavaScript</th><th>Python</th></tr></thead>
+              <tbody>{summary_rows}</tbody>
+            </table>
+            {details if any_issues else '<div class="all-clear">All scanners passed across all repositories. No security issues detected.</div>'}
+            <div class="footer">Generated by kraftanmelding/github_alt_security_scanner &middot; automated nightly scan</div>
+          </body>
+          </html>"""
+
+          with open('report.html', 'w') as f:
+              f.write(html_content)
+          print(f"Report generated for {len(all_results)} repositories")
+          PYEOF
+
+      - name: Convert to PDF
+        run: |
+          google-chrome-stable \
+            --headless \
+            --disable-gpu \
+            --run-all-compositor-stages-before-draw \
+            --print-to-pdf="$GITHUB_WORKSPACE/security-report.pdf" \
+            --no-pdf-header-footer \
+            "file://$GITHUB_WORKSPACE/report.html"
+
+      - name: Send to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.SECURITY_SCANNER_DISCORD_WEBHOOK }}
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          REPO_COUNT=$(ls /tmp/results | wc -l | tr -d ' ')
+          curl -X POST \
+            -F "payload_json={\"content\": \"Security scan complete — ${TODAY} · ${REPO_COUNT} repos scanned\"}" \
+            -F "file=@$GITHUB_WORKSPACE/security-report.pdf;type=application/pdf" \
+            "$DISCORD_WEBHOOK_URL"
