@@ -71,7 +71,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/eslint-scan/node_modules
-          key: eslint-security-${{ runner.os }}-eslint8-security1
+          key: eslint-security-${{ runner.os }}-eslint8-security1-vue1
 
       - name: Setup ESLint config
         run: |
@@ -81,7 +81,14 @@ jobs:
             "plugins": ["security"],
             "extends": ["plugin:security/recommended"],
             "env": { "browser": true, "node": true, "es2022": true },
-            "parserOptions": { "ecmaVersion": 2022, "sourceType": "module" }
+            "parserOptions": { "ecmaVersion": 2022, "sourceType": "module" },
+            "overrides": [
+              {
+                "files": ["*.vue"],
+                "parser": "vue-eslint-parser",
+                "parserOptions": { "ecmaVersion": 2022, "sourceType": "module" }
+              }
+            ]
           }
           EOF
 
@@ -90,7 +97,7 @@ jobs:
         run: |
           cd /tmp/eslint-scan
           npm init -y
-          npm install --save-dev eslint@8 eslint-plugin-security@1
+          npm install --save-dev eslint@8 eslint-plugin-security@1 vue-eslint-parser
 
       - name: Ensure ESLint is executable
         run: chmod +x /tmp/eslint-scan/node_modules/.bin/eslint
@@ -166,6 +173,9 @@ jobs:
                 --no-eslintrc \
                 --config .eslintrc.json \
                 --resolve-plugins-relative-to /tmp/eslint-scan \
+                --ignore-pattern "vendor/**" \
+                --ignore-pattern "**/swagger-ui*" \
+                --ignore-pattern "**/node_modules/**" \
                 $FILES > "$RESULTS_DIR/eslint.json" 2>&1 || true
               cd -
             fi
