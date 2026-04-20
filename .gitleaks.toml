@@ -1,0 +1,7 @@
+[allowlist]
+  paths = [
+    '''spec/support/vcr''',
+    '''config/secrets\.yml\.example''',
+    '''spec/fixtures''',
+    '''test/fixtures'''
+  ]
