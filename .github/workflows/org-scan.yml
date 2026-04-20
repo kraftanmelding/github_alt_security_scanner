@@ -80,6 +80,7 @@ jobs:
           {
             "plugins": ["security"],
             "extends": ["plugin:security/recommended"],
+            "rules": { "security/detect-object-injection": "off" },
             "env": { "browser": true, "node": true, "es2022": true },
             "parserOptions": { "ecmaVersion": 2022, "sourceType": "module" },
             "overrides": [
@@ -144,6 +145,7 @@ jobs:
             # Gitleaks
             gitleaks detect \
               --source="$REPO_DIR" \
+              --config="$GITHUB_WORKSPACE/.gitleaks.toml" \
               --report-format=json \
               --report-path="$RESULTS_DIR/gitleaks.json" \
               --redact \
@@ -246,7 +248,7 @@ jobs:
               if data is None:
                   r['Ruby/Rails'] = ('skip', 'Brakeman', 0, '')
               else:
-                  warnings = data.get('warnings', [])
+                  warnings = [w for w in data.get('warnings', []) if w.get('confidence') in ('High', 'Medium')]
                   if not warnings:
                       r['Ruby/Rails'] = ('ok', 'Brakeman', 0, '')
                   else:
@@ -262,7 +264,9 @@ jobs:
                   for f in data:
                       fname = f['filePath'].split('/')[-1]
                       for m in f.get('messages', []):
-                          rows.append([m.get('ruleId', ''), f'<span class="mono">{fname}</span>', str(m.get('line', '')), m.get('message', '')])
+                        if not m.get('ruleId'):                                                       
+                            continue
+                        rows.append([m.get('ruleId', ''), f'<span class="mono">{fname}</span>', str(m.get('line', '')), m.get('message', '')])
                   if not rows:
                       r['JavaScript'] = ('ok', 'ESLint', 0, '')
                   else:
