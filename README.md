@@ -15,8 +15,7 @@ Each scanner is language-aware — if a repo has no Python files, the Bandit job
 
 ## How findings are reported
 
-- **GitHub Step Summary**: detailed findings table visible in the Actions run (no digging through logs)
-- **GitHub Issue**: a `security-scan` labelled issue is created/updated in the scanned repo with a summary and a link to the full run. When all scanners come back clean, the issue closes itself automatically.
+- A pdf report is sent to Discord channel
 
 Scans never fail a PR or block a merge.
 
