@@ -117,7 +117,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SCANNER_PAT }}
         run: |
-          REPOS=$(gh api "orgs/kraftanmelding/repos" --paginate --jq '.[].name' | tr '\n' ' ')
+          REPOS=$(gh api "orgs/kraftanmelding/repos" --paginate --jq '.[] | select(.archived == false) | .name' | tr '\n' ' ')
           echo "list=$REPOS" >> $GITHUB_OUTPUT
 
       - name: Scan all repos
