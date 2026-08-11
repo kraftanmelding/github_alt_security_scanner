@@ -1,0 +1,21 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: '0 4 1 * *'  # runs 1st of every month
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Touch keep-alive file
+        run: |
+          date > .github/keep-alive
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/keep-alive
+          git commit -m "chore: keep-alive [skip ci]" || echo "nothing to commit"
+          git push
